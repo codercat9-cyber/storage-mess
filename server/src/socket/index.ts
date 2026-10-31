@@ -157,10 +157,17 @@ export function initializeSocket(httpServer: HttpServer): Server {
     socket.on('message:send', (data) => {
       const msgStart = Date.now();
       try {
+        // Повтор с тем же client_id — не дубль: отдаём сохранённое только отправителю
+        const cid = (data as { client_id?: unknown })?.client_id;
+        if (typeof cid === 'string' && cid) {
+          const existing = messageService.findByClientId(data.chat_id, userId, cid);
+          if (existing) { socket.emit('message:new', existing); return; }
+        }
         const message = messageService.sendMessage(data.chat_id, userId, {
           content: data.content,
           type: data.type as any || 'text',
           metadata: data.metadata,
+          client_id: typeof cid === 'string' && cid ? cid : undefined,
         });
 
         if (message) {

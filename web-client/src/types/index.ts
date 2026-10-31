@@ -30,6 +30,8 @@ export interface ReactionSummary {
 
 export interface Message {
   id: string;
+  // Сквозной номер от отправителя: один и тот же на сервере, в BLE-mesh и LoRa
+  client_id?: string | null;
   chat_id: string;
   sender_id: string;
   sender: User;

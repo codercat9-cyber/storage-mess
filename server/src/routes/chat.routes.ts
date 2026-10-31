@@ -365,24 +365,10 @@ router.get('/:chatId/messages', (req: Request, res: Response) => {
 });
 
 // Повтор из очереди клиента. Таймаут на телефоне не значит, что сервер
-// запрос не получил: ответ мог потеряться на обратном пути, и клиент
-// отправит то же сообщение ещё раз. Клиент присылает свой client_id, и
-// второй приход возвращает уже сохранённое вместо дубля. Храним в памяти:
-// повтор приходит в пределах минут, а дубль после перезапуска сервера
-// лучше, чем схема базы ради редкого случая.
-const CLIENT_ID_TTL_MS = 24 * 60 * 60 * 1000;
-const recentClientIds = new Map<string, { messageId: string; at: number }>();
-
-function rememberClientId(key: string, messageId: string) {
-  const now = Date.now();
-  if (recentClientIds.size > 5000) {
-    for (const [k, v] of recentClientIds) {
-      if (now - v.at > CLIENT_ID_TTL_MS) recentClientIds.delete(k);
-    }
-  }
-  recentClientIds.set(key, { messageId, at: now });
-}
-
+// запрос не получил: ответ мог потеряться на обратном пути. Клиент
+// присылает свой client_id; второй приход возвращает уже сохранённое.
+// Номер хранится в базе (messages.client_id) — переживает перезапуск и
+// заодно склеивает копии, пришедшие получателю по mesh или LoRa.
 // Отправить сообщение
 router.post('/:chatId/messages', (req: Request, res: Response) => {
   try {
@@ -400,15 +386,11 @@ router.post('/:chatId/messages', (req: Request, res: Response) => {
       return;
     }
 
-    const clientKey = typeof client_id === 'string' && client_id.length > 0 && client_id.length <= 100
-      ? `${userId}:${chatId}:${client_id}`
-      : null;
-    if (clientKey) {
-      const seen = recentClientIds.get(clientKey);
-      const existing = seen && Date.now() - seen.at < CLIENT_ID_TTL_MS ? messageService.findById(seen.messageId) : undefined;
+    const clientId = typeof client_id === 'string' && client_id.length > 0 && client_id.length <= 100 ? client_id : undefined;
+    if (clientId) {
+      const existing = messageService.findByClientId(chatId, userId, clientId);
       if (existing) {
-        const sender = userService.findById(userId);
-        res.status(200).json({ message: { ...existing, sender: sender ? userService.getPublicProfile(sender) : undefined }, duplicate: true });
+        res.status(200).json({ message: existing, duplicate: true });
         return;
       }
     }
@@ -418,13 +400,13 @@ router.post('/:chatId/messages', (req: Request, res: Response) => {
       type: type || 'text',
       reply_to_id,
       metadata,
+      client_id: clientId,
     });
 
     if (!message) {
       res.status(500).json({ error: 'Failed to send message' });
       return;
     }
-    if (clientKey) rememberClientId(clientKey, (message as any).id);
 
     // Отправляем событие всем участникам чата
     const io = getIo();

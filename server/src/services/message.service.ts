@@ -71,11 +71,12 @@ export class MessageService {
     const messageId = uuidv4();
     const now = new Date().toISOString();
     const metadata = data.metadata ? JSON.stringify(data.metadata) : null;
+    const clientId = typeof data.client_id === 'string' && data.client_id.length <= 100 ? data.client_id : null;
 
     dbUtils.run(
-      `INSERT INTO messages (id, chat_id, sender_id, reply_to_id, content, type, metadata, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [messageId, chatId, senderId, data.reply_to_id || null, data.content, data.type || 'text', metadata, now]
+      `INSERT INTO messages (id, chat_id, sender_id, reply_to_id, content, type, metadata, created_at, client_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [messageId, chatId, senderId, data.reply_to_id || null, data.content, data.type || 'text', metadata, now, clientId]
     );
 
     // Обновляем время чата
@@ -94,6 +95,18 @@ export class MessageService {
       metadata: this.parseMetadata(message.metadata as any),
       sender: userService.getPublicProfile(sender),
     };
+  }
+
+  /** Уже сохранённое сообщение с этим client_id (повтор из очереди или копия из mesh). */
+  findByClientId(chatId: string, senderId: string, clientId: string): MessageWithSender | null {
+    const row = dbUtils.get<{ id: string }>(
+      'SELECT id FROM messages WHERE sender_id = ? AND client_id = ? AND chat_id = ? AND deleted_at IS NULL',
+      [senderId, clientId, chatId]);
+    if (!row) return null;
+    const message = this.findById(row.id);
+    const sender = userService.findById(senderId);
+    if (!message || !sender) return null;
+    return { ...message, sender: userService.getPublicProfile(sender) } as MessageWithSender;
   }
 
   // Поиск сообщения по ID

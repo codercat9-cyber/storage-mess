@@ -34,6 +34,7 @@ import pushRoutes from './routes/push.routes.js';
 import updateRoutes from './routes/update.routes.js';
 import callRoutes from './routes/call.routes.js';
 import adminRoutes from './routes/admin.routes.js';
+import { startLanDiscovery } from './services/lan-discovery.service.js';
 import { reportRouter, legalRouter, moderationRouter } from './routes/moderation.routes.js';
 import { initPushService } from './services/push.service.js';
 import { transcriptionService } from './services/transcription.service.js';
@@ -1045,6 +1046,8 @@ async function start(): Promise<void> {
 
     httpServer.listen(config.port, config.host, () => {
       logger.info(`🚀 STORAGE&MESS Server started`);
+      // Свой сервер должен находиться и без интернета — см. lan-discovery
+      startLanDiscovery({ https: useHttps, port: config.port, name: process.env.SERVER_NAME });
       initHealthChecker(getIo(), httpServer);
       if (useHttps) {
         initDPIProtection({ port: config.port });

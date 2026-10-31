@@ -4,6 +4,7 @@ import { useAuthStore } from '@/store/auth';
 import { authApi, updateApiBaseUrl } from '@/lib/api';
 import { getApiUrl, recheckConnection } from '@/lib/connection';
 import { Eye, EyeOff, Loader2, Send } from 'lucide-react';
+import LanServerPicker from '@/components/LanServerPicker';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -143,6 +144,10 @@ export default function LoginPage() {
             Входя, вы принимаете <Link to="/terms" className="text-primary-400 underline">Правила использования</Link>.
             Мессенджер не является СМИ; за размещённое отвечает пользователь.
           </p>
+          <details className="text-messenger-muted">
+            <summary className="text-[12px] text-center cursor-pointer">Свой сервер / без интернета</summary>
+            <div className="pt-2"><LanServerPicker compact /></div>
+          </details>
         </form>
 
         <div className="text-center mt-6 animate-fadeIn space-y-3">

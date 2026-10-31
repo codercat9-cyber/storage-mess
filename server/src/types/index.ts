@@ -195,6 +195,9 @@ export interface SendMessageRequest {
   type?: Message['type'];
   reply_to_id?: string;
   metadata?: Record<string, unknown>;
+  // Сквозной номер сообщения от клиента: один и тот же на всех путях
+  // доставки (сервер, BLE-mesh, LoRa) — по нему склеиваются копии.
+  client_id?: string;
 }
 
 export interface InitiateCallRequest {

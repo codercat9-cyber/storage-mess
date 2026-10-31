@@ -8,7 +8,8 @@ import { useUploadStore, etaSeconds, stageLabel, overallPercent } from '@/store/
 import { useContactOverrides } from '@/store/contactOverrides';
 import { chatApi, fileApi, userApi, reportApi } from '@/lib/api';
 import { downloadFileNative } from '@/lib/capacitor-bridge';
-import { socketEmit } from '@/lib/socket';
+import { socketEmit, isSocketConnected } from '@/lib/socket';
+import { getLoraStatus, loraSendChat } from '@/lib/lora';
 import { startRecording, stopRecording, cancelRecording } from '@/lib/voice';
 import { transcribeAudioFromUrl, learnTranscriptionCorrection } from '@/lib/speech';
 import { 
@@ -922,6 +923,44 @@ export default function ChatArea({ chat, onInitiateCall, isCallActive }: ChatAre
     userScrolledUpRef.current = false;
     scrollToBottom();
 
+    // Mesh (BLE, дальше LoRa): тот же client_id, что уйдёт на сервер, —
+    // получатель склеит копию из mesh с серверной. Раньше mesh включался
+    // только после провала отправки на сервер, то есть через 10 с таймаута.
+    let meshSent = false;
+    const meshFanout = () => {
+      if (meshSent) return;
+      try {
+        const bridge = (window as any).AndroidBridge;
+        if (!bridge?.isMeshActive?.()) return;
+        const me = useAuthStore.getState().user;
+        const name = me?.display_name || me?.username || 'User';
+        if (bridge.sendMeshMessageWithId) bridge.sendMeshMessageWithId(content, name, null, String(chat.id), pendingId);
+        else if (bridge.sendMeshMessage) bridge.sendMeshMessage(content, name, null, String(chat.id));
+        else return;
+        meshSent = true;
+        useChatStore.getState().updateMessage(pendingId, { metadata: { viaMesh: true } as any });
+        console.log('📡 [MESH] отправлено по mesh');
+      } catch (meshErr) {
+        console.warn('📡 [MESH] не ушло:', meshErr);
+      }
+    };
+    // LoRa (свой узел Meshtastic): тот же client_id — копии склеятся
+    let loraSent = false;
+    const loraFanout = () => {
+      if (loraSent) return;
+      const me = useAuthStore.getState().user;
+      if (!me?.id || getLoraStatus().state !== 'ready') return;
+      loraSent = true;
+      loraSendChat(String(chat.id), me.id, pendingId, content).then(ok => {
+        if (ok) {
+          useChatStore.getState().updateMessage(pendingId, { metadata: { viaLora: true } as any });
+          console.log('📡 [LoRa] отправлено в эфир');
+        }
+      });
+    };
+    // Сервер недоступен — в mesh и LoRa сразу; на сервер уйдёт из очереди
+    if (!isSocketConnected()) { meshFanout(); loraFanout(); }
+
     // Сообщение уже показано — ставим в очередь для повторной отправки.
     const queueIt = () => enqueueMessage({
       id: pendingId,
@@ -995,23 +1034,8 @@ export default function ChatArea({ chat, onInitiateCall, isCallActive }: ChatAre
       if (queued) {
         console.log('📦 Message queued for offline delivery');
 
-        // 📡 BLE Mesh fallback: если mesh активен — дублируем через BLE
-        try {
-          const bridge = (window as any).AndroidBridge;
-          if (bridge?.isMeshActive?.() && bridge?.sendMeshMessage) {
-            const currentUser = useAuthStore.getState().user;
-            bridge.sendMeshMessage(
-              content,
-              currentUser?.display_name || currentUser?.username || 'User',
-              null, // broadcast — все пиры
-              String(chat.id)
-            );
-            console.log('📡 [MESH] Message sent via BLE mesh fallback');
-            useChatStore.getState().updateMessage(pendingId, { status: 'sent', metadata: { viaMesh: true } as any });
-          }
-        } catch (meshErr) {
-          console.warn('📡 [MESH] Fallback failed:', meshErr);
-        }
+        meshFanout();
+        loraFanout();
       }
     } catch (error) {
       // Сервер ответил ошибкой (или очередь не записалась) — помечаем как

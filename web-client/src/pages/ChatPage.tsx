@@ -5,7 +5,7 @@ import { useChatStore } from '@/store/chat';
 import { decryptMessages } from '@/lib/e2ee';
 import { useContactOverrides } from '@/store/contactOverrides';
 import { chatApi } from '@/lib/api';
-import { cacheChats, getCachedChats, cacheMessages, getCachedMessages } from '@/lib/offline-cache';
+import { cacheChats, getCachedChats, cacheMessages, getCachedMessages, cacheSingleMessage } from '@/lib/offline-cache';
 import { initSocket, setOnIncomingCall, setOnCallAnswered, setOnCallEnded, setOnCallRejected, setOnSocketReconnect, socketEmit, ensureSocketConnected, isSocketConnected } from '@/lib/socket';
 import { stopRingtone, dismissCallNotification } from '@/lib/notifications';
 import { registerAudioElement, unregisterAudioElement, resetAudioOutput } from '@/lib/audioOutput';
@@ -47,6 +47,7 @@ import GroupCallSetup from '@/components/GroupCallSetup';
 import StoragePanel from '@/components/StoragePanel';
 import { Loader2, Phone, PhoneOff } from 'lucide-react';
 import { Call, Message } from '@/types';
+import { prefetchRecentMessages } from '@/lib/prefetch';
 
 // =====================================================================
 // ChatPage — главная страница чата с поддержкой голосовой/видеосвязи
@@ -528,9 +529,14 @@ export default function ChatPage() {
         console.log('📡 [MESH] Received:', data.name, ':', data.text, 'chatId:', data.chatId, 'userId:', data.userId);
         
         // Если есть chatId и userId — добавляем как полноценное сообщение в чат
-        if (data.chatId && data.userId) {
+        // Только в свои чаты: mesh вещает всем вокруг, чужое не показываем
+        const knownChat = data.chatId && useChatStore.getState().chats.some(c => String(c.id) === String(data.chatId));
+        if (data.chatId && data.userId && knownChat) {
+          // Сквозной номер: новые сборки шлют client_id номером mesh-сообщения
+          const cid = data.cid || (typeof data.id === 'string' && data.id.startsWith('pending-') ? data.id : undefined);
           const meshMsg = {
-            id: `mesh-${data.id || Date.now()}`,
+            id: `mesh-${cid || data.id || Date.now()}`,
+            client_id: cid,
             chat_id: String(data.chatId),
             sender_id: String(data.userId),
             sender: {
@@ -546,6 +552,7 @@ export default function ChatPage() {
             created_at: new Date(data.ts || Date.now()).toISOString(),
           };
           useChatStore.getState().addMessage(meshMsg);
+          cacheSingleMessage(meshMsg).catch(() => {});
         }
         
         // Toast для видимости
@@ -553,6 +560,8 @@ export default function ChatPage() {
       }
     };
     window.addEventListener('mesh-message', handleMeshMessage);
+    // Свой узел Meshtastic: переподключиться к последнему (APK, Bluetooth)
+    setTimeout(() => { import('@/lib/lora').then(m => m.autoReconnect()).catch(() => {}); }, 2000);
 
     return () => {
       window.removeEventListener('webrtc-server-signal', handleServerSignal);
@@ -995,6 +1004,9 @@ export default function ChatPage() {
         // он существовал только чтобы прикрыть моргание первого кадра,
         // а моргание лечится порядком, а не второй копией данных.
         cacheChats(allChats).catch(() => {});
+        // Хвосты верхних чатов — в локальную базу, чтобы без сервера
+        // открывался любой чат, а не только уже открытые
+        setTimeout(() => { prefetchRecentMessages(allChats).catch(() => {}); }, 3000);
       } catch (error) {
         // Сети нет — на экране остаётся то, что уже показано из кэша.
         console.warn('Список чатов из сети не получен, показан локальный:', error);

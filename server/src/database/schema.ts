@@ -464,6 +464,9 @@ export const migrations = [
   `CREATE INDEX IF NOT EXISTS idx_reports_message ON content_reports(message_id)`,
 
   // Какую редакцию правил человек принял и когда.
+  // Сквозной номер сообщения от клиента (аварийная шина: сервер, mesh, LoRa)
+  `ALTER TABLE messages ADD COLUMN client_id TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_client ON messages(sender_id, client_id)`,
   `ALTER TABLE users ADD COLUMN terms_version TEXT`,
   `ALTER TABLE users ADD COLUMN terms_accepted_at DATETIME`,
 ];

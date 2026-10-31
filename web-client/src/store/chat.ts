@@ -65,15 +65,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setCurrentChat: (chat) => set({ currentChat: chat }),
 
   setMessages: (chatId, messages) => set((state) => {
-    // Сохраняем pending (оптимистичные) сообщения при перезагрузке с сервера/кэша
+    // Перезагрузка истории с сервера/кэша не должна стирать то, чего на
+    // сервере ещё нет: черновики из очереди (pending-) и копии, пришедшие
+    // по mesh/LoRa (mesh-). Раньше mesh-копии пропадали при каждом
+    // перезапросе истории — сообщение из аварийной сети исчезало с экрана.
     const existing = state.messages[chatId] || [];
-    const pendingMsgs = existing.filter(m => m.id.startsWith('pending-'));
-    // Оставляем только те pending, которые ещё не пришли с сервера (по content match)
-    const unresolvedPending = pendingMsgs.filter(p => 
-      !messages.some(m => m.sender_id === p.sender_id && m.content === p.content && !m.id.startsWith('pending-'))
-    );
+    const isLocal = (m: Message) => m.id.startsWith('pending-') || m.id.startsWith('mesh-');
+    const serverCids = new Set(messages.map(m => m.client_id).filter(Boolean) as string[]);
+    const unresolved = existing.filter(l => {
+      if (!isLocal(l)) return false;
+      const cid = l.client_id || (l.id.startsWith('pending-') ? l.id : undefined);
+      if (cid && serverCids.has(cid)) return false;
+      // Старые сборки сервера client_id не отдают — прежняя сверка по тексту
+      return !messages.some(m => !isLocal(m) && m.sender_id === l.sender_id && m.content === l.content
+                                 && (!m.client_id || !cid));
+    });
+    const merged = unresolved.length
+      ? [...messages, ...unresolved].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+      : messages;
     return {
-      messages: { ...state.messages, [chatId]: [...messages, ...unresolvedPending] },
+      messages: { ...state.messages, [chatId]: merged },
     };
   }),
 
@@ -95,6 +106,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Проверяем, нет ли уже такого сообщения (по id)
     if (chatMessages.some(m => m.id === message.id)) {
       return state;
+    }
+
+    // Склейка по сквозному номеру: черновик (его id и есть client_id), копия
+    // из mesh/LoRa и копия с сервера — одно сообщение. Серверная главнее:
+    // она заменяет черновик и mesh-копию, а не наоборот.
+    if (message.client_id) {
+      const cid = message.client_id;
+      const idx = chatMessages.findIndex(m => m.id === cid || m.client_id === cid);
+      if (idx >= 0) {
+        const cur = chatMessages[idx];
+        const curIsServer = !cur.id.startsWith('pending-') && !cur.id.startsWith('mesh-');
+        const newIsServer = !message.id.startsWith('pending-') && !message.id.startsWith('mesh-');
+        if (curIsServer || !newIsServer) return state;
+        const updated = [...chatMessages];
+        updated[idx] = message;
+        return { messages: { ...state.messages, [message.chat_id]: updated } };
+      }
     }
 
     // Если это реальное сообщение от сервера — заменяем pending от того же отправителя
@@ -285,3 +313,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 }));
 
 export default useChatStore;
+
+// Для автотестов аварийного режима (scripts/offline-suite.cjs): хранилище
+// видно снаружи только с флагом smess_test — у обычных пользователей его нет.
+try {
+  if (typeof window !== 'undefined' && localStorage.getItem('smess_test') === '1') {
+    (window as any).__chatStore = useChatStore;
+  }
+} catch { /* приватный режим */ }

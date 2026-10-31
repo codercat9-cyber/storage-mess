@@ -13,6 +13,8 @@ import { getPendingCount, flushQueue } from '@/lib/offline-queue';
 import { useChatStore } from '@/store/chat';
 import { isE2EEEnabled, setE2EEEnabled, getDeviceId, initE2EE, publishKeys } from '@/lib/e2ee';
 import { ArrowLeft, User, Bell, Globe, LogOut, Loader2, Camera, Trash2, Pencil, AlertTriangle, Palette, ChevronDown, ChevronUp, ChevronRight, Shield, Copy, Check, ImagePlus, X, Radio, Music, Volume2, RotateCcw, Wifi, Send, Server, Lock, Bug, Mail, Download } from 'lucide-react';
+import LoraPanel from '@/components/LoraPanel';
+import LanServerPicker from '@/components/LanServerPicker';
 
 export default function SettingsPage() {
   // Версии сборок для раздела загрузок — телефонная и настольная нумеруются
@@ -1150,6 +1152,8 @@ export default function SettingsPage() {
                     ID устройства: <span className="font-mono text-messenger-text">{meshDeviceId}</span>
                   </p>
                 )}
+                <LoraPanel />
+                <LanServerPicker />
               </>
             ) : (
               <div className="px-5 pb-3">
