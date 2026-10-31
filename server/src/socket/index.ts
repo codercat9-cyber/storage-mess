@@ -224,6 +224,8 @@ export function initializeSocket(httpServer: HttpServer): Server {
 
     // Индикатор набора
     socket.on('message:typing', (data) => {
+      // Только в свои чаты: иначе посторонний «печатал» бы в чужих
+      if (!data?.chat_id || !chatService.isChatMember(data.chat_id, userId)) return;
       socket.to(`chat:${data.chat_id}`).emit('message:typing_status', {
         chat_id: data.chat_id,
         user_id: userId,
@@ -234,6 +236,7 @@ export function initializeSocket(httpServer: HttpServer): Server {
     // Пометить как прочитанное
     socket.on('message:read', (data) => {
       try {
+        if (!data?.chat_id || !chatService.isChatMember(data.chat_id, userId)) return;
         messageService.markAsRead(data.chat_id, userId, data.message_id);
         // Уведомляем отправителя что сообщения прочитаны
         io?.to(`chat:${data.chat_id}`).emit('message:read_ack', {

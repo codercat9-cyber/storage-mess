@@ -690,8 +690,43 @@ function authenticateFromQuery(req: Request) {
 }
 
 // Вспомогательная: проверка доступа к файлу
+// Типы, которые браузер показывает, не исполняя кода. SVG сюда не входит:
+// это документ со скриптами.
+const SAFE_INLINE = /^(image\/(png|jpe?g|gif|webp|bmp|avif|heic|heif|x-icon)|video\/[\w.+-]+|audio\/[\w.+-]+|application\/pdf|text\/plain)$/i;
+function isSafeInlineType(mime: string | null | undefined): boolean {
+  return !!mime && SAFE_INLINE.test(mime.split(';')[0].trim());
+}
+// Отдаваемый файл — не страница нашего сайта: без скриптов, форм и чужих загрузок
+const FILE_CSP = "sandbox; default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'unsafe-inline'";
+
+// Кому можно файл. Раньше — любому вошедшему, знающему номер файла, а
+// номера расходятся: пересылки, ушедшие из чата. Теперь: публичный — всем;
+// иначе загрузившему, участникам чата, где файл отправлен, и администрации.
+// Ответ кэшируется: файл качают кусками, и проверка на каждый кусок лишняя.
+const fileAccessCache = new Map<string, number>();
+const FILE_ACCESS_TTL_MS = 10 * 60_000;
+
+function canAccessFile(file: any, userId: string | undefined): boolean {
+  if (file.is_public) return true;
+  if (!userId) return false;
+  if (file.uploader_id === userId) return true;
+  const key = `${userId}:${file.id}`;
+  const exp = fileAccessCache.get(key);
+  if (exp && exp > Date.now()) return true;
+  const ok =
+    !!dbUtils.get(
+      `SELECT 1 AS x FROM messages m JOIN chat_members cm ON cm.chat_id = m.chat_id AND cm.user_id = ?
+        WHERE json_extract(m.metadata, '$.file_id') = ? LIMIT 1`, [userId, file.id]) ||
+    !!dbUtils.get(`SELECT 1 AS x FROM users WHERE id = ? AND role IN ('admin', 'moderator')`, [userId]);
+  if (ok) {
+    if (fileAccessCache.size > 50000) fileAccessCache.clear();
+    fileAccessCache.set(key, Date.now() + FILE_ACCESS_TTL_MS);
+  }
+  return ok;
+}
+
 function checkFileAccess(file: any, req: Request, res: Response): boolean {
-  if (!file.is_public && !req.user) {
+  if (!canAccessFile(file, req.user?.userId)) {
     res.status(403).json({ error: 'Access denied' });
     return false;
   }
@@ -720,6 +755,8 @@ router.get('/download/:fileId', optionalAuthMiddleware, async (req: Request, res
 
     const disposition = `attachment; filename="${encodeURIComponent(file.original_name)}"; filename*=UTF-8''${encodeURIComponent(file.original_name)}`;
     const contentType = file.mime_type || 'application/octet-stream';
+    // Вложение браузер не показывает, но песочница — на случай, если покажет
+    res.setHeader('Content-Security-Policy', FILE_CSP);
 
     const isEncrypted = fileEncryption.isEnabled() && fileEncryption.isFileEncrypted(filePath, file.size);
     const range = req.headers.range;
@@ -788,10 +825,11 @@ router.get('/download/:fileId', optionalAuthMiddleware, async (req: Request, res
 // Генерация signed download URL (per-user dynamic key)
 router.get('/signed-url/:fileId', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId;
+    const userId = req.user!.userId;
     const { fileId } = req.params;
     const file = storageService.findById(fileId);
     if (!file) { res.status(404).json({ error: 'File not found' }); return; }
+    if (!checkFileAccess(file, req, res)) return;
     
     // Генерируем per-user download token (действует 1 час)
     const token = fileEncryption.generateDownloadToken(userId, fileId, 3600);
@@ -813,6 +851,10 @@ router.get('/thumbnail/:fileId', optionalAuthMiddleware, async (req: Request, re
   try {
     authenticateFromQuery(req);
     const { fileId } = req.params;
+    // Миниатюра — тоже содержимое файла: раньше отдавалась без проверки, кому угодно
+    const thumbOf = storageService.findById(fileId);
+    if (!thumbOf) { res.status(404).json({ error: 'File not found' }); return; }
+    if (!checkFileAccess(thumbOf, req, res)) return;
     let thumbPath = storageService.getThumbnailPath(fileId);
 
     // Если thumbnail нет — пробуем сгенерировать on-demand (для видео без превью)
@@ -870,8 +912,14 @@ router.get('/view/:fileId', optionalAuthMiddleware, async (req: Request, res: Re
     const filePath = storageService.getFilePath(fileId);
     if (!filePath) { res.status(404).json({ error: 'File not found on storage' }); return; }
 
-    const disposition = `inline; filename="${encodeURIComponent(file.original_name)}"; filename*=UTF-8''${encodeURIComponent(file.original_name)}`;
-    const contentType = file.mime_type || 'application/octet-stream';
+    // Показываем в браузере только то, что не может выполнить код. Тип файла
+    // заявляет загрузивший: раньше HTML или SVG со скриптом открывался прямо
+    // на нашем домене и забирал токены входа из хранилища браузера. Всё
+    // прочее — только скачиванием и в песочнице без скриптов.
+    const safeInline = isSafeInlineType(file.mime_type);
+    const disposition = `${safeInline ? 'inline' : 'attachment'}; filename="${encodeURIComponent(file.original_name)}"; filename*=UTF-8''${encodeURIComponent(file.original_name)}`;
+    const contentType = safeInline ? (file.mime_type as string) : 'application/octet-stream';
+    if (!/^application\/pdf/i.test(contentType)) res.setHeader('Content-Security-Policy', FILE_CSP);
     const isEncrypted = fileEncryption.isEnabled() && fileEncryption.isFileEncrypted(filePath, file.size);
     const range = req.headers.range;
 

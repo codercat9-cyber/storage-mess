@@ -4,7 +4,7 @@ import { emailService } from '../services/email.service.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken, authMiddleware } from '../middleware/auth.js';
 import { JWTPayload } from '../types/index.js';
 import { RegisterRequest, LoginRequest } from '../types/index.js';
-import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync } from 'crypto';
+import { randomBytes, createCipheriv, createDecipheriv, pbkdf2Sync, timingSafeEqual } from 'crypto';
 import nodemailer from 'nodemailer';
 import { logger } from '../utils/logger.js';
 import { getClientIp } from '../utils/client-ip.js';
@@ -240,9 +240,34 @@ router.post('/register', async (req: Request, res: Response) => {
 });
 
 // Вход
+// Перебор паролей. Минимальный пароль — 6 символов, и без ограничения его
+// подбирали бы со скоростью сервера. Окно 15 минут: на имя — 10 неудач, с
+// адреса — 30 (за одним адресом бывает целый оператор связи).
+const LOGIN_WINDOW_MS = 15 * 60_000;
+const loginFails = new Map<string, { n: number; since: number }>();
+function loginBlocked(key: string, limit: number): boolean {
+  const r = loginFails.get(key);
+  return !!r && r.n >= limit && Date.now() - r.since < LOGIN_WINDOW_MS;
+}
+function loginFailed(...keys: string[]) {
+  const now = Date.now();
+  for (const k of keys) {
+    const r = loginFails.get(k);
+    if (!r || now - r.since > LOGIN_WINDOW_MS) loginFails.set(k, { n: 1, since: now });
+    else r.n++;
+  }
+  if (loginFails.size > 20000) loginFails.clear();
+}
+
 router.post('/login', async (req: Request, res: Response) => {
   try {
     const data: LoginRequest = req.body;
+    const ipKey = 'ip:' + (getClientIp(req) || '');
+    const userKey = 'u:' + String(data?.username || '').trim().toLowerCase();
+    if (loginBlocked(ipKey, 30) || loginBlocked(userKey, 10)) {
+      res.status(429).json({ error: 'Слишком много неудачных попыток. Подождите 15 минут.' });
+      return;
+    }
 
     if (!data.username || !data.password) {
       res.status(400).json({ error: 'Username and password are required' });
@@ -268,6 +293,7 @@ router.post('/login', async (req: Request, res: Response) => {
         `Вход не удался: пользователя «${typed}» нет` +
         (similar.length ? `. Похожие в базе: ${similar.join(', ')}` : '')
       );
+      loginFailed(ipKey, userKey);
       res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
@@ -275,9 +301,11 @@ router.post('/login', async (req: Request, res: Response) => {
     const isValid = await userService.verifyPassword(data.password, user.password_hash);
     if (!isValid) {
       logger.warn(`Вход не удался: неверный пароль у «${user.username}»`);
+      loginFailed(ipKey, userKey);
       res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
+    loginFails.delete(userKey);
     logger.info(`Вход выполнен: ${user.username}`);
 
     // Обновляем статус
@@ -570,8 +598,17 @@ router.get('/email-reset-available', (_req: Request, res: Response) => {
 // Сброс пароля администратором
 router.post('/admin-reset', async (req: Request, res: Response) => {
   try {
-    const secret = req.headers['x-admin-secret'];
-    if (!config.adminSecret || secret !== config.adminSecret) {
+    // Сброс по заголовку — только с самой машины сервера (ярлык «Сброс
+    // пароля» ходит на https://localhost). Снаружи этот путь подбирали бы:
+    // он меняет пароль ЛЮБОМУ, включая админа. Из админки сброс идёт по ролям.
+    const ip = getClientIp(req) || '';
+    const local = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    const secret = String(req.headers['x-admin-secret'] || '');
+    const want = String(config.adminSecret || '');
+    const same = want.length > 0 && secret.length === want.length &&
+                 timingSafeEqual(Buffer.from(secret), Buffer.from(want));
+    if (!local || !same) {
+      if (!local) logger.warn(`admin-reset снаружи отклонён: ${ip}`);
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
