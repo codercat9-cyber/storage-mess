@@ -109,12 +109,18 @@ export function generateRefreshToken(payload: Omit<JWTPayload, 'iat' | 'exp'>): 
  * Токен обновления: подлинность — по подписи, срок — по базе, а не по JWT.
  * Иначе скользящий срок невозможен: продлить срок, зашитый в токен, нельзя.
  */
-export function verifyRefreshToken(token: string): JWTPayload | null {
+export function verifyRefreshToken(token: string): (JWTPayload & { legacy?: boolean }) | null {
   try {
     return jwt.verify(token, config.jwt.secret, { ignoreExpiration: true }) as JWTPayload;
-  } catch {
-    return null;
+  } catch { /* может быть подписан прежним секретом */ }
+  // Подпись прежним секретом НЕ доказывает подлинность (секрет был
+  // угадываемым) — такой токен принимается, только если он лежит в базе.
+  for (const old of config.jwt.legacySecrets) {
+    try {
+      return { ...(jwt.verify(token, old, { ignoreExpiration: true }) as JWTPayload), legacy: true };
+    } catch { /* следующий */ }
   }
+  return null;
 }
 
 export function verifyToken(token: string): JWTPayload | null {

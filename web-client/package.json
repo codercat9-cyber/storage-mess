@@ -1,7 +1,7 @@
 {
   "name": "storage-mess-client",
   "private": true,
-  "version": "2.12.98",
+  "version": "2.12.99",
   "type": "module",
   "scripts": {
     "dev": "vite",

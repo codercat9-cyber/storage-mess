@@ -15,6 +15,10 @@ export const config = {
   // JWT
   jwt: {
     secret: process.env.JWT_SECRET || 'default-secret-change-me',
+    // Прежние секреты: ими проверяются только токены обновления, лежащие в
+    // базе (см. auth.routes /refresh). До 31.10.2026 боевым секретом стояла
+    // заглушка из .env.example — подделать вход мог кто угодно.
+    legacySecrets: (process.env.JWT_SECRET_OLD || '').split(',').map(s => s.trim()).filter(Boolean),
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
   },
 

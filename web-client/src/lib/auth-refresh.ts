@@ -31,7 +31,10 @@ export function refreshAccessToken(apiUrl: string): Promise<RefreshResult> {
       const response = await axios.post(`${apiUrl}/auth/refresh`, { refreshToken }, { timeout: 20000 });
       const accessToken = response.data?.accessToken;
       if (!accessToken) return 'failed';
-      useAuthStore.getState().setAccessToken(accessToken);
+      // Сервер может выдать и новый токен обновления (смена секрета подписи)
+      const rotated = response.data?.refreshToken;
+      if (rotated) useAuthStore.getState().setTokens(accessToken, rotated);
+      else useAuthStore.getState().setAccessToken(accessToken);
       return 'ok';
     } catch (err) {
       const status = (err as any)?.response?.status;

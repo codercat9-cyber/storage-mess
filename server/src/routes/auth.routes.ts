@@ -310,8 +310,29 @@ router.post('/login', async (req: Request, res: Response) => {
 });
 
 // Обновление токена
+// Перебор токенов обновления: ограничиваем неудачные попытки с адреса.
+const refreshFails = new Map<string, { n: number; since: number }>();
+const REFRESH_FAIL_LIMIT = 60; // в час
+
+function refreshFailed(ip: string) {
+  const now = Date.now();
+  const r = refreshFails.get(ip);
+  if (!r || now - r.since > 3600_000) refreshFails.set(ip, { n: 1, since: now });
+  else r.n++;
+  if (refreshFails.size > 10000) refreshFails.clear();
+}
+
 router.post('/refresh', (req: Request, res: Response) => {
   try {
+    const ip = getClientIp(req) || '';
+    const fails = refreshFails.get(ip);
+    if (fails && fails.n >= REFRESH_FAIL_LIMIT && Date.now() - fails.since < 3600_000) {
+      res.status(429).json({ error: 'Too many attempts' });
+      return;
+    }
+    // Любой ответ 401 ниже считается неудачной попыткой
+    res.on('finish', () => { if (res.statusCode === 401) refreshFailed(ip); });
+
     const { refreshToken } = req.body;
 
     if (!refreshToken) {
@@ -342,7 +363,7 @@ router.post('/refresh', (req: Request, res: Response) => {
       }
       // Скользящий срок: пользуется — сессия продлевается
       dbUtils.run('UPDATE refresh_tokens SET expires_at = ? WHERE token = ?', [refreshExpiry(), refreshToken]);
-    } else if (amnestyAllowed(payload)) {
+    } else if (!payload.legacy && amnestyAllowed(payload)) {
       dbUtils.run(
         `INSERT INTO refresh_tokens (id, user_id, token, device_info, ip_address, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [uuidv4(), payload.userId, refreshToken, 'amnesty', getClientIp(req), refreshExpiry(), new Date().toISOString()]
@@ -361,6 +382,18 @@ router.post('/refresh', (req: Request, res: Response) => {
 
     // Генерируем новый access token
     const accessToken = generateAccessToken({ userId: user.id, username: user.username });
+
+    // Токен, подписанный прежним секретом, меняем на новый. Старый остаётся
+    // в базе — необновлённые приложения нового не сохранят и ходят со старым.
+    if (payload.legacy) {
+      const fresh = generateRefreshToken({ userId: user.id, username: user.username });
+      dbUtils.run(
+        `INSERT INTO refresh_tokens (id, user_id, token, device_info, ip_address, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [uuidv4(), user.id, fresh, 'rotated', getClientIp(req), refreshExpiry(), new Date().toISOString()]
+      );
+      res.json({ accessToken, refreshToken: fresh });
+      return;
+    }
 
     res.json({ accessToken });
   } catch (error) {
