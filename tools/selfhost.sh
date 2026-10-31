@@ -85,4 +85,8 @@ say "Запуск: $NAME"
 for ip in $LAN_IPS; do echo "  https://$ip:$PORT"; done
 echo "  Телефоны в этой сети: Настройки → «Свой сервер» → «Найти сервер рядом»."
 echo "  Сертификат самоподписанный — браузер попросит подтвердить один раз."
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+  echo "  Фаервол ufw включён — откройте порты, иначе телефоны не найдут и не достучатся:"
+  echo "    sudo ufw allow $PORT/tcp && sudo ufw allow 47620/udp"
+fi
 cd "$ROOT/server" && exec node dist/index.js
