@@ -9,8 +9,10 @@
 // приложению тем же событием, что и BLE-mesh ('mesh-message') — с
 // client_id, так что копии из LoRa склеиваются с серверными.
 //
-// Содержимое в открытой сборке не шифруется: канал Meshtastic по
-// умолчанию общий, его ключ публичен. Интерфейс об этом предупреждает.
+// Защита содержимого — модуль seal.ts: подпись сообщений «всем»,
+// шифрование личных, обмен ключами служебными кадрами. В открытой сборке
+// на его месте заглушка — тогда всё идёт как есть, под общим ключом
+// канала Meshtastic, и интерфейс об этом предупреждает.
 // =============================================================
 
 import {
@@ -18,9 +20,10 @@ import {
   MT_BROADCAST, MT_PORT_TEXT, MT_PORT_PRIVATE, MtPacket,
 } from './meshtastic';
 import {
-  addrFromNode, split, decodeFrame, Reassembler, SMESH_ALL, SMESH_T_CHAT, SMESH_T_TEXT,
+  split, decodeFrame, encodeFrame, Reassembler, SMESH_ALL, SMESH_T_CHAT, SMESH_T_TEXT, addrEq, addrFromNode,
   encodeChatBody, decodeChatBody, ChatBody,
 } from './smesh';
+import { Sealer, SMESH_T_CTRL, SMESH_T_SEALED, Trust } from './seal';
 
 export interface LoraTransport {
   /** true — канал сам режет на сообщения (BLE), false — поток байт (UART) */
@@ -34,8 +37,11 @@ export type LinkState = 'connecting' | 'ready' | 'closed';
 
 export interface LinkEvents {
   state?: (s: LinkState, info: { myNum: number; nodes: number }) => void;
-  chat?: (m: ChatBody & { fromNode: number; via: 'lora' }) => void;
-  text?: (m: { fromNode: number; name: string; text: string }) => void;
+  chat?: (m: ChatBody & { fromNode: number; via: 'lora'; trust: Trust; key?: string }) => void;
+  /** direct — пришло лично нам (а не всем); mesh — обычный текст Meshtastic */
+  text?: (m: { fromNode: number; name: string; text: string; trust: Trust; key?: string; direct?: boolean; mesh?: boolean }) => void;
+  /** защищённое не открылось (чужой ключ, порча) */
+  sealedFail?: (m: { fromNode: number; name: string; direct: boolean }) => void;
 }
 
 const rand32 = () => (crypto.getRandomValues(new Uint32Array(1))[0] || 1) >>> 0;
@@ -53,8 +59,9 @@ export class LoraLink {
   private retry: ReturnType<typeof setInterval> | null = null;
   private lastFrame = 0;
   private sendChain: Promise<void> = Promise.resolve();
+  private ctrl: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private t: LoraTransport, private ev: LinkEvents = {}) {
+  constructor(private t: LoraTransport, private ev: LinkEvents = {}, readonly sealer: Sealer) {
     this.parser = new FrameParser(f => this.onFromRadio(f));
     t.onData(d => (t.framed ? this.onFromRadio(d) : this.parser.push(d)));
   }
@@ -64,11 +71,21 @@ export class LoraLink {
     // Пока узел льёт настройки — не перезапрашиваем (см. smess-lora, app.c)
     this.retry = setInterval(() => { if (this.state !== 'ready' && Date.now() - this.lastFrame > 8000) this.ask(); }, 2000);
     this.hb = setInterval(() => { if (this.state === 'ready') this.out(encodeHeartbeat(rand32())); }, 60000);
+    // Служебные кадры модуля защиты: представиться, ответить, попросить ключ
+    this.ctrl = setInterval(() => { if (this.state === 'ready') this.pumpCtrl(); }, 3000);
+  }
+
+  private pumpCtrl() {
+    const o = this.sealer.ctrlOut(Date.now());
+    if (!o) return;
+    const f = encodeFrame({ type: SMESH_T_CTRL, msgId: rand32(), from: this.sealer.self(), to: o.to, idx: 0, total: 1, body: o.body });
+    this.queue([encodeSend({ to: o.toNode, channel: this.channel, portnum: MT_PORT_PRIVATE, payload: f, id: rand32() })]).catch(() => {});
   }
 
   close() {
     if (this.hb) clearInterval(this.hb);
     if (this.retry) clearInterval(this.retry);
+    if (this.ctrl) clearInterval(this.ctrl);
     this.state = 'closed';
     this.t.close();
     this.emitState();
@@ -76,9 +93,26 @@ export class LoraLink {
 
   /** Сообщение чата мессенджера — в эфир. Возвращает число кадров. */
   sendChat(m: ChatBody): Promise<number> {
-    const body = encodeChatBody(m);
-    const frames = split(SMESH_T_CHAT, rand32(), addrFromNode(this.myNum), SMESH_ALL, body);
-    return this.queue(frames.map(f => encodeSend({ to: MT_BROADCAST, channel: this.channel, portnum: MT_PORT_PRIVATE, payload: f, id: rand32() })))
+    return this.sendSmesh(SMESH_T_CHAT, MT_BROADCAST, SMESH_ALL, encodeChatBody(m));
+  }
+
+  /** Текст STORAGE&MESS всем (подписан) или лично узлу (зашифрован). */
+  sendSmeshText(text: string, toNode = MT_BROADCAST): Promise<number> {
+    let to: Uint8Array = SMESH_ALL;
+    if (toNode !== MT_BROADCAST) {
+      const p = this.sealer.peer(toNode);
+      if (!p) return Promise.reject(new Error('Ключ узла ещё не известен — попросил его представиться, повторите через минуту'));
+      to = p;
+    }
+    return this.sendSmesh(SMESH_T_TEXT, toNode, to, new TextEncoder().encode(text));
+  }
+
+  private sendSmesh(type: number, toNode: number, to: Uint8Array, body: Uint8Array): Promise<number> {
+    const msgId = rand32();
+    const s = this.sealer.seal({ type, msgId, from: this.sealer.self(), to }, body);
+    if (!s) return Promise.reject(new Error('Не удалось защитить сообщение'));
+    const frames = split(s.type, msgId, s.from, to, s.body);
+    return this.queue(frames.map(f => encodeSend({ to: toNode, channel: this.channel, portnum: MT_PORT_PRIVATE, payload: f, id: rand32() })))
       .then(() => frames.length);
   }
 
@@ -119,7 +153,7 @@ export class LoraLink {
     if (!m) return;
     this.lastFrame = Date.now();
     switch (m.kind) {
-      case 'myInfo': this.myNum = m.myNodeNum; break;
+      case 'myInfo': this.myNum = m.myNodeNum; this.sealer.init(this.myNum); break;
       case 'nodeInfo': this.nodes.set(m.node.num, { name: m.node.shortName || m.node.longName, lastHeard: m.node.lastHeard }); break;
       case 'configComplete':
         if (this.state !== 'ready') { this.state = 'ready'; this.emitState(); }
@@ -134,19 +168,29 @@ export class LoraLink {
     if (!p.hasDecoded || p.from === this.myNum) return;
     const name = this.nodes.get(p.from)?.name || '!' + p.from.toString(16).padStart(8, '0');
     if (p.portnum === MT_PORT_TEXT) {
-      this.ev.text?.({ fromNode: p.from, name, text: new TextDecoder().decode(p.payload) });
+      this.ev.text?.({ fromNode: p.from, name, text: new TextDecoder().decode(p.payload), trust: 'none', mesh: true });
       return;
     }
     if (p.portnum !== MT_PORT_PRIVATE) return;
     const f = decodeFrame(p.payload);
     if (!f) return;
+    const toAll = addrEq(f.to, SMESH_ALL);
+    // лично, но не нам (открытые сборки адресуют номером узла, полные — ключом)
+    if (!toAll && !addrEq(f.to, this.sealer.self()) && !addrEq(f.to, addrFromNode(this.myNum))) return;
     const done = this.rx.push(f);
     if (!done) return;
-    if (done.type === SMESH_T_CHAT) {
-      const c = decodeChatBody(done.body);
-      if (c) this.ev.chat?.({ ...c, fromNode: p.from, via: 'lora' });
-    } else if (done.type === SMESH_T_TEXT) {
-      this.ev.text?.({ fromNode: p.from, name, text: new TextDecoder().decode(done.body) });
+    const hdr = { type: done.type, msgId: f.msgId, from: f.from, to: f.to };
+    if (done.type === SMESH_T_CTRL) { this.sealer.onCtrl(p.from, hdr, done.body); return; }
+    const o = this.sealer.open(p.from, hdr, done.body);
+    if (!o) {
+      if (done.type & SMESH_T_SEALED) this.ev.sealedFail?.({ fromNode: p.from, name, direct: !toAll });
+      return;
+    }
+    if (o.type === SMESH_T_CHAT) {
+      const c = decodeChatBody(o.body);
+      if (c) this.ev.chat?.({ ...c, fromNode: p.from, via: 'lora', trust: o.trust, key: o.key });
+    } else if (o.type === SMESH_T_TEXT) {
+      this.ev.text?.({ fromNode: p.from, name, text: new TextDecoder().decode(o.body), trust: o.trust, key: o.key, direct: !toAll });
     }
   }
 }

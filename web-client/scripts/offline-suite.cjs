@@ -13,7 +13,8 @@
 //  Учётка одна и та же (smess_offline_test) — тест не плодит мусор.
 //  Запуск из web-client (dist собран):  node scripts/offline-suite.cjs
 // ═══════════════════════════════════════════════════════════════════
-const puppeteer = require('puppeteer');
+// puppeteer-core живёт вне проекта (~/.local/share/smess-testkit), чтобы npm install его не вычищал
+const puppeteer = (() => { try { return require('puppeteer'); } catch { return require(require('os').homedir() + '/.local/share/smess-testkit/node_modules/puppeteer-core'); } })();
 const fs = require('fs');
 const path = require('path');
 

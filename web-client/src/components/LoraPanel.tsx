@@ -1,8 +1,13 @@
 import { useEffect, useState } from 'react';
 import {
   onLoraStatus, onAir, LoraStatus, AirMessage, hasBle, hasSerial, scanBle, connectBle, connectSerial,
-  disconnectLora, loraSendAir,
+  disconnectLora, loraSendAir, loraSendSmess, loraSelfId, loraPeers, loraTrust, loraProtected,
 } from '@/lib/lora';
+
+const MARK: Record<string, string> = { signed: '✔', private: '🔒' };
+const markTitle = (m: AirMessage) =>
+  m.trust === 'private' ? 'лично, зашифровано' : m.trust === 'signed' ? 'подпись верна' :
+  m.kind === 'mesh' ? 'обычное сообщение Meshtastic, без подписи' : 'без подписи — автора подделать может кто угодно';
 
 /** Настройки → LoRa: свой узел Meshtastic, эфир, аварийная связь без интернета. */
 export default function LoraPanel() {
@@ -12,10 +17,12 @@ export default function LoraPanel() {
   const [scanning, setScanning] = useState(false);
   const [note, setNote] = useState('');
   const [say, setSay] = useState('');
+  const [to, setTo] = useState('smess'); // smess — всем с подписью, mesh — как Meshtastic, иначе номер узла
+  const [, setTick] = useState(0);
 
   useEffect(() => {
     const u1 = onLoraStatus(setSt);
-    const u2 = onAir(setAir);
+    const u2 = onAir(a => { setAir(a); setTick(t => t + 1); });
     const onScan = (e: Event) => {
       const d = (e as CustomEvent).detail;
       setFound(list => (list.some(x => x.address === d.address) ? list : [...list, d]));
@@ -45,9 +52,16 @@ export default function LoraPanel() {
         Связь без интернета и сотовой сети на километры: подключите свой узел Meshtastic. Когда сервер недоступен,
         сообщения чатов уходят в эфир, а пришедшее по эфиру появляется в чатах.
       </div>
-      <div className="text-[12px] rounded-lg bg-orange-500/10 text-orange-300 px-3 py-2 leading-snug">
-        Канал общий: без шифрования сообщения в эфире слышат все узлы в радиусе. Это аварийная связь — личное лучше не писать.
-      </div>
+      {loraProtected() ? (
+        <div className="text-[12px] rounded-lg bg-emerald-500/10 text-emerald-300 px-3 py-2 leading-snug">
+          Сообщения всем подписаны — автора не подделать, но слышат их все узлы в радиусе. Личные — узлу, чей ключ известен, —
+          зашифрованы: прочтёт только он. Ваш ключ: <b>{loraSelfId() || 'появится при подключении'}</b>
+        </div>
+      ) : (
+        <div className="text-[12px] rounded-lg bg-orange-500/10 text-orange-300 px-3 py-2 leading-snug">
+          Канал общий: без шифрования сообщения в эфире слышат все узлы в радиусе. Это аварийная связь — личное лучше не писать.
+        </div>
+      )}
       <div className="text-[14px]">Узел: <b>{label}</b></div>
 
       <div className="flex flex-wrap gap-2">
@@ -82,16 +96,47 @@ export default function LoraPanel() {
           <div className="text-[13px] text-messenger-muted">Эфир (общий канал Meshtastic):</div>
           <div className="max-h-48 overflow-y-auto space-y-1 text-[13px]">
             {air.length === 0 && <div className="text-messenger-muted">пока тихо</div>}
-            {air.slice(-30).map((m, i) => (
-              <div key={i}><span className="text-messenger-muted">{new Date(m.at).toLocaleTimeString('ru-RU')} </span><b>{m.name}:</b> {m.text}</div>
+            {air.slice(-30).map((m, i) => m.kind === 'note' ? (
+              <div key={i} className="text-orange-300"><span className="text-messenger-muted">{new Date(m.at).toLocaleTimeString('ru-RU')} </span>⚠ {m.text}</div>
+            ) : (
+              <div key={i}><span className="text-messenger-muted">{new Date(m.at).toLocaleTimeString('ru-RU')} </span>
+                <span title={markTitle(m)} className={m.trust === 'none' && m.kind !== 'mesh' ? 'text-orange-300' : 'text-emerald-300'}>
+                  {MARK[m.trust || ''] || (m.kind === 'mesh' ? '' : '⚠')}
+                </span>{' '}<b>{m.name}{m.direct ? ' (лично)' : ''}:</b> {m.text}</div>
             ))}
           </div>
           <div className="flex gap-2">
-            <input value={say} onChange={e => setSay(e.target.value)} maxLength={200} placeholder="Сказать в эфир"
-                   className="flex-1 rounded-lg bg-messenger-hover/60 px-3 py-2 text-sm outline-none" />
-            <button disabled={!say.trim()} onClick={async () => { if (await loraSendAir(say.trim())) setSay(''); }}
-                    className="px-3 py-2 rounded-xl bg-primary-500 text-white text-sm disabled:opacity-40">Отправить</button>
+            <select value={to} onChange={e => setTo(e.target.value)} className="rounded-lg bg-messenger-hover/60 px-2 py-2 text-sm outline-none max-w-[40%]">
+              {loraProtected() && <option value="smess">Всем, с подписью</option>}
+              <option value="mesh">Всем (Meshtastic)</option>
+              {loraPeers().filter(p => !p.changed).map(p => (
+                <option key={p.node} value={String(p.node)}>🔒 !{p.node.toString(16).padStart(8, '0')}</option>
+              ))}
+            </select>
+            <input value={say} onChange={e => setSay(e.target.value)} maxLength={to === 'mesh' ? 200 : 600} placeholder="Сказать в эфир"
+                   className="flex-1 min-w-0 rounded-lg bg-messenger-hover/60 px-3 py-2 text-sm outline-none" />
+            <button disabled={!say.trim()} onClick={async () => {
+              const t = say.trim();
+              if (to === 'mesh') { if (await loraSendAir(t)) setSay(''); return; }
+              const err = await loraSendSmess(t, to === 'smess' ? undefined : Number(to));
+              if (err) setNote(err); else { setSay(''); setNote(''); }
+            }} className="px-3 py-2 rounded-xl bg-primary-500 text-white text-sm disabled:opacity-40">Отправить</button>
           </div>
+          {loraPeers().length > 0 && (
+            <div className="space-y-1 text-[13px]">
+              <div className="text-messenger-muted">Ключи собеседников (запоминаются при первой встрече):</div>
+              {loraPeers().map(p => (
+                <div key={p.node} className="flex items-center justify-between gap-2">
+                  <span>!{p.node.toString(16).padStart(8, '0')} · <span className="text-messenger-muted">{p.id}</span></span>
+                  {p.changed && (
+                    <button onClick={() => {
+                      if (window.confirm(`Узел назвал другой ключ (${p.changed}). Принимать, только если собеседник сменил устройство. Принять?`)) { loraTrust(p.node); setTick(t => t + 1); }
+                    }} className="px-2 py-1 rounded-lg bg-orange-500/20 text-orange-300 text-[12px]">новый ключ — принять?</button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

@@ -4,6 +4,9 @@
 // Узел Meshtastic по USB на машине сервера + учётка-бот в мессенджере.
 // Всё, что слышно в эфире (обычные сообщения Meshtastic и сообщения
 // клиентов STORAGE&MESS LoRa на STM32), попадает в группу «📡 LoRa-эфир».
+// Подписи сообщений «всем» проверяются (seal.ts): в группе видно, что
+// подтверждено, а что пришло без подписи. Личные сообщения в группу не
+// идут — они не для неё.
 // Написанное в этой группе людьми уходит в эфир — только если включено
 // (tx: true): канал общий, его слышат все узлы в радиусе.
 //
@@ -19,9 +22,20 @@ import {
   FrameParser, decodeFromRadio, encodeWantConfig, encodeHeartbeat, encodeSend, frame, WAKE,
   MT_BROADCAST, MT_PORT_TEXT, MT_PORT_PRIVATE, MtPacket,
 } from '../../web-client/src/lib/lora/meshtastic';
-import { decodeFrame, Reassembler, SMESH_T_TEXT, nodeFromAddr } from '../../web-client/src/lib/lora/smesh';
+import { decodeFrame, Reassembler, SMESH_T_TEXT, SMESH_ALL, addrEq } from '../../web-client/src/lib/lora/smesh';
+import { Sealer, SealStore, SMESH_T_CTRL } from '../../web-client/src/lib/lora/seal';
 
 const CFG_PATH = path.join(os.homedir(), '.config', 'smess-lora-gateway.json');
+const KEY_PATH = path.join(os.homedir(), '.config', 'smess-lora-gateway.key');
+const PEERS_PATH = path.join(os.homedir(), '.config', 'smess-lora-gateway.peers.json');
+
+// Ключ шлюза и книга чужих ключей — файлы с правами 600
+const fileStore: SealStore = {
+  load: () => { try { const b = fs.readFileSync(KEY_PATH); return b.length === 32 ? new Uint8Array(b) : null; } catch { return null; } },
+  save: s => fs.writeFileSync(KEY_PATH, s, { mode: 0o600 }),
+  loadBook: () => { try { return fs.readFileSync(PEERS_PATH, 'utf8'); } catch { return null; } },
+  saveBook: j => fs.writeFileSync(PEERS_PATH, j, { mode: 0o600 }),
+};
 const TERMS = '2026-11-01';
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) StorageMessLoraGateway/1.0';
 
@@ -116,7 +130,7 @@ class Messenger {
 class Node {
   fd = -1; myNum = 0; names = new Map<number, string>(); ready = false;
   private parser: FrameParser; private cfgId = 0; private askedAt = 0;
-  constructor(private port: string, private onPacket: (p: MtPacket) => void) {
+  constructor(private port: string, private onPacket: (p: MtPacket) => void, private onMyNum: (n: number) => void = () => {}) {
     this.parser = new FrameParser(f => this.onFrame(f));
   }
   open() {
@@ -136,7 +150,7 @@ class Node {
     const m = decodeFromRadio(f);
     if (!m) return;
     if (!this.ready) this.askedAt = Date.now(); // идут настройки — перезапрос подождёт
-    if (m.kind === 'myInfo') this.myNum = m.myNodeNum;
+    if (m.kind === 'myInfo') { this.myNum = m.myNodeNum; this.onMyNum(this.myNum); }
     else if (m.kind === 'nodeInfo') this.names.set(m.node.num, m.node.shortName || m.node.longName || '');
     else if (m.kind === 'configComplete' && !this.ready) { this.ready = true; log(`узел готов: !${this.myNum.toString(16)}, знает ${this.names.size} узлов`); }
     else if (m.kind === 'rebooted') { this.ready = false; log('узел перезагрузился'); this.askedAt = Date.now() + 5000; }
@@ -164,6 +178,7 @@ async function main() {
   log(`мессенджер: ${cfg.username}, группа ${chatId}, передача в эфир: ${cfg.tx ? 'ВКЛ' : 'выкл'}`);
 
   const rx = new Reassembler();
+  const sealer = new Sealer(fileStore, n => log('защита:', n));
   const toChat: { text: string; cid: string }[] = [];
   const node = new Node(cfg.port, p => {
     if (!p.hasDecoded || p.from === node.myNum) return;
@@ -174,15 +189,21 @@ async function main() {
       toChat.push({ text: `📡 ${who}: ${text}`, cid: `lora-${p.from.toString(16)}-${p.id.toString(16)}` });
     } else if (p.portnum === MT_PORT_PRIVATE) {
       const f = decodeFrame(p.payload);
-      if (!f) return;
+      if (!f || !addrEq(f.to, SMESH_ALL)) return; // личное — не для группы
       const done = rx.push(f);
-      if (done && done.type === SMESH_T_TEXT) {
-        const text = new TextDecoder().decode(done.body);
-        log(`эфир ← ${who} (STORAGE&MESS LoRa): ${text}`);
-        toChat.push({ text: `📡 ${who} [STM32]: ${text}`, cid: `lora-${nodeFromAddr(f.from).toString(16)}-${f.msgId.toString(16)}` });
+      if (!done) return;
+      const hdr = { type: done.type, msgId: f.msgId, from: f.from, to: f.to };
+      if (done.type === SMESH_T_CTRL) { sealer.onCtrl(p.from, hdr, done.body); return; }
+      const o = sealer.open(p.from, hdr, done.body);
+      if (!o) { log(`эфир ← ${who}: подпись не сошлась — отброшено`); return; }
+      if (o.type === SMESH_T_TEXT) {
+        const text = new TextDecoder().decode(o.body);
+        const mark = o.trust === 'signed' ? `✔ ключ ${o.key}` : '⚠ без подписи';
+        log(`эфир ← ${who} (STORAGE&MESS LoRa, ${mark}): ${text}`);
+        toChat.push({ text: `📡 ${who} [${mark}]: ${text}`, cid: `lora-${p.from.toString(16)}-${f.msgId.toString(16)}` });
       }
     }
-  });
+  }, n => sealer.init(n));
   node.open();
   setInterval(() => node.tick(), 20);
   setInterval(() => node.heartbeat(), 60000);

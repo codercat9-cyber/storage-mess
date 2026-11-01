@@ -18,7 +18,7 @@ const LORA_C = path.join(ROOT, '..', '..', '..', 'smess-lora');
 const out = path.join(os.tmpdir(), 'smess-lora-ts-' + process.pid + '.cjs');
 const entry = path.join(os.tmpdir(), 'smess-lora-entry-' + process.pid + '.ts');
 const LIB = path.join(ROOT, 'src/lib/lora');
-fs.writeFileSync(entry, `export * from '${LIB}/meshtastic'; export * as smesh from '${LIB}/smesh'; export { LoraLink } from '${LIB}/link';`);
+fs.writeFileSync(entry, `export * from '${LIB}/meshtastic'; export * as smesh from '${LIB}/smesh'; export { LoraLink } from '${LIB}/link'; export { Sealer } from '${LIB}/seal';`);
 execFileSync(path.join(ROOT, 'node_modules/.bin/esbuild'),
   [entry, '--bundle', '--platform=node', '--format=cjs', '--outfile=' + out, '--log-level=warning']);
 fs.unlinkSync(entry);
@@ -116,17 +116,28 @@ async function linkTest() {
       if (r.payload) phones.filter(p => p.num !== num).forEach(p => p.hear(packetFR(num, r.port, r.payload)));
     }
     const t = { framed, write: d => { if (framed) onTo(d); else { const raw = d.length === 32 && d.every(x => x === 0xc3); if (!raw) parser.push(d); } }, onData: cb => { deliver = cb; }, close() {} };
-    const got = { chat: [], text: [], state: '' };
-    const link = new L.LoraLink(t, { chat: m => got.chat.push(m), text: m => got.text.push(m), state: s => { got.state = s; } });
+    const got = { chat: [], text: [], state: '', notes: [], fail: [] };
+    const mem = { seed: null, book: null };
+    const sealer = new L.Sealer({ load: () => mem.seed, save: x => { mem.seed = x; }, loadBook: () => mem.book, saveBook: j => { mem.book = j; } },
+      n => got.notes.push(n));
+    const link = new L.LoraLink(t, { chat: m => got.chat.push(m), text: m => got.text.push(m), state: s => { got.state = s; },
+      sealedFail: m => got.fail.push(m) }, sealer);
     const ph = { num, name, link, got, hear: fr => toPhone(fr) };
     phones.push(ph);
     return ph;
   }
   const A = makePhone(0xa1a1a1a1, 'Аня', true);    // как по Bluetooth
   const B = makePhone(0xb2b2b2b2, 'Боря', false);  // как по USB
-  A.link.start(); B.link.start();
+  const C = makePhone(0xc3c3c3c3, 'Вика', true);   // третья — слышит эфир
+  A.link.start(); B.link.start(); C.link.start();
   await new Promise(r => setTimeout(r, 400));
   check('оба подключились к узлам', A.got.state === 'ready' && B.got.state === 'ready', `A:${A.got.state} B:${B.got.state}, B знает узлов: ${B.link.nodes.size}`);
+  const prot = A.link.sealer.active;
+  if (prot) {
+    await new Promise(r => setTimeout(r, 3300)); // служебные кадры идут раз в 3 с
+    check('представились: Аня и Боря знают ключи друг друга', !!A.link.sealer.peer(B.num) && !!B.link.sealer.peer(A.num),
+      `A знает ${A.link.sealer.peers().length}, B знает ${B.link.sealer.peers().length}`);
+  }
   const long = 'Связь есть. '.repeat(30) + 'Конец.';
   const msgIn = { chatId: '9db6c3ba-70ba-4aa8-9618-a42fd7765067', senderId: 'bb26bc06-c731-4e76-b2b0-c9e23f590a8e', clientId: 'pending-1793475247061-abcdefghij', text: long };
   const t0 = Date.now();
@@ -135,10 +146,21 @@ async function linkTest() {
   const gotB = B.got.chat[0];
   check(`длинное сообщение чата: ${Buffer.byteLength(long)} байт, ${frames} кадра, пауза между кадрами`, frames >= 2 && Date.now() - t0 >= 1400 * (frames - 1));
   check('Боря получил: тот же чат, отправитель, client_id и текст', gotB && gotB.chatId === msgIn.chatId && gotB.senderId === msgIn.senderId && gotB.clientId === msgIn.clientId && gotB.text === long);
+  if (prot) {
+    check('сообщение чата подписано и подпись верна', gotB && gotB.trust === 'signed', gotB && gotB.trust);
+    const nf = await A.link.sendSmeshText('встреча у водокачки в 18:00', B.num);
+    await new Promise(r => setTimeout(r, 150));
+    const dm = B.got.text.find(m => m.direct);
+    check(`личное Ане → Боре (${nf} кадр): открыл, зашифровано`, dm && dm.text === 'встреча у водокачки в 18:00' && dm.trust === 'private', JSON.stringify(dm));
+    check('третья в эфире личное не видит и не пытается открыть', !C.got.text.some(m => m.direct) && !C.got.fail.length);
+    let err = '';
+    await A.link.sendSmeshText('?', 0x12345678).catch(e => { err = e.message; });
+    check('лично неизвестному узлу — отказ с объяснением', /не известен/.test(err), err);
+  }
   await B.link.sendText('Боря в эфире');
   await new Promise(r => setTimeout(r, 100));
   check('обычный эфир: Аня слышит Борю по имени узла', A.got.text[0] && A.got.text[0].text === 'Боря в эфире' && A.got.text[0].name === 'Боря', JSON.stringify(A.got.text[0]));
-  A.link.close(); B.link.close();
+  A.link.close(); B.link.close(); C.link.close();
 }
 
 // ── 4. живой узел ──
