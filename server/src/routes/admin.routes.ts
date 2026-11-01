@@ -22,7 +22,7 @@ import { dbUtils } from '../database/index.js';
 import { userService } from '../services/user.service.js';
 import { chatService } from '../services/chat.service.js';
 import { messageService } from '../services/message.service.js';
-import { getIo, emitToUser, isUserOnline, getConnectedSessions } from '../socket/index.js';
+import { getIo, emitToUser, isUserOnline, getConnectedSessions, disconnectUser } from '../socket/index.js';
 import { getBannedIPs, unbanIP } from '../index.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
@@ -172,8 +172,7 @@ router.post('/users/:id/block', (req: Request, res: Response) => {
               [new Date().toISOString(), reason || null, id]);
   // Рвём сессии: без этого человек остаётся в системе до протухания токена.
   dbUtils.run('DELETE FROM refresh_tokens WHERE user_id = ?', [id]);
-  const io = getIo();
-  if (io) emitToUser(io, id, 'account:blocked', { reason });
+  disconnectUser(id, reason || null);
 
   res.json({ success: true });
 });

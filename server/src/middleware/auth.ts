@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt, { SignOptions, Secret } from 'jsonwebtoken';
+import { randomUUID } from 'crypto';
 import { config } from '../config/index.js';
 import { JWTPayload } from '../types/index.js';
 import { dbUtils } from '../database/index.js';
@@ -101,7 +102,9 @@ export function generateRefreshToken(payload: Omit<JWTPayload, 'iat' | 'exp'>): 
   const secret: Secret = config.jwt.secret;
   // Срок внутри токена — лишь верхняя граница. Действующий срок хранит база
   // (refresh_tokens.expires_at) и продлевает при каждом обновлении.
-  const options: SignOptions = { expiresIn: '3650d' };
+  // jwtid — случайный: без него два входа одного человека в одну секунду
+  // давали одинаковый токен, и запись в refresh_tokens падала (UNIQUE)
+  const options: SignOptions = { expiresIn: '3650d', jwtid: randomUUID() };
   return jwt.sign(payload as object, secret, options);
 }
 

@@ -10,6 +10,12 @@ import { decryptMessage, decryptMessages, isE2EEEnabled, EncryptedMessage, E2EEE
 import { notifyNewMessage, notifyIncomingCall } from '@/lib/notifications';
 import { subscribeToPush } from '@/lib/pwa';
 import { flushQueue, getPendingCount } from '@/lib/offline-queue';
+
+function blockedLogout(reason: string | null) {
+  try { sessionStorage.setItem('smess_blocked', reason || ''); } catch { /* */ }
+  useAuthStore.getState().logout();
+  window.location.href = '/login';
+}
 import { cacheSingleMessage, updateCachedMessage, deleteCachedMessage } from '@/lib/offline-cache';
 import { userApi } from '@/lib/api';
 
@@ -169,8 +175,13 @@ export function initSocket(): Socket {
     }
   });
 
+  // Учётку заблокировали (админ, модератор, каталог организации): выходим
+  // со всех вкладок и устройств сразу, а не когда истечёт токен
+  socket.on('account:blocked' as any, (d: any) => blockedLogout(d?.reason));
+
   socket.on('connect_error', async (error: any) => {
     console.error('🔌 Socket connection error:', error.message, 'Full:', JSON.stringify({ name: error.name, message: error.message, desc: error.description, context: error.context }));
+    if (error.message === 'Account blocked') { blockedLogout(null); return; }
     
     // Если токен невалиден/протух — пробуем обновить через refresh token
     if (error.message === 'Invalid token' || error.message === 'Authentication required') {

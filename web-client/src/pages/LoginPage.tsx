@@ -10,7 +10,15 @@ export default function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => {
+    // Выкинуло блокировкой — говорим почему, один раз
+    try {
+      const r = sessionStorage.getItem('smess_blocked');
+      if (r === null) return '';
+      sessionStorage.removeItem('smess_blocked');
+      return 'Учётная запись заблокирована' + (r ? `: ${r}` : '') + '. Обратитесь к администратору.';
+    } catch { return ''; }
+  });
   const [loading, setLoading] = useState(false);
 
   const login = useAuthStore((state) => state.login);

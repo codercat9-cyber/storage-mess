@@ -70,8 +70,14 @@ export function initializeSocket(httpServer: HttpServer): Server {
         return next(new Error('Invalid token format'));
       }
 
-      logger.info(`🔒 Socket auth OK — user: ${payload.username} (${userId}), socket: ${socket.id}`);
       const fullUser = userService.findById(userId);
+      // Заблокированного не пускаем: токен доступа живёт дольше блокировки,
+      // и без этой проверки он переподключался и писал дальше
+      if ((fullUser as any)?.blocked_at) {
+        logger.warn(`🔒 Socket auth REJECTED — account blocked: ${payload.username} (${userId})`);
+        return next(new Error('Account blocked'));
+      }
+      logger.info(`🔒 Socket auth OK — user: ${payload.username} (${userId}), socket: ${socket.id}`);
       socket.data.user = {
         ...payload,
         userId,
@@ -850,6 +856,17 @@ export function initializeSocket(httpServer: HttpServer): Server {
 // Получить экземпляр io для использования в роутах
 export function getIo(): Server<ClientToServerEvents, ServerToClientEvents, {}, SocketData> | null {
   return io;
+}
+
+/** Блокировка учётки: сказать клиенту и оборвать все его соединения
+ * (переподключиться не даст проверка в io.use). */
+export function disconnectUser(userId: string, reason?: string | null): void {
+  if (!io) return;
+  const ids = [...(connectedUsers.get(userId) || [])];
+  for (const id of ids) io.to(id).emit('account:blocked' as any, { reason: reason || null });
+  setTimeout(() => {
+    for (const id of ids) io?.sockets.sockets.get(id)?.disconnect(true);
+  }, 500);
 }
 
 // Утилиты для отправки событий извне

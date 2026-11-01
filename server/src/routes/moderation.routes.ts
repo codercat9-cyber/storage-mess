@@ -19,7 +19,7 @@ import { adminMiddleware, adminOnly, audit, AdminUser } from '../middleware/admi
 import { dbUtils } from '../database/index.js';
 import { chatService } from '../services/chat.service.js';
 import { storageService } from '../services/storage.service.js';
-import { getIo, emitToUser } from '../socket/index.js';
+import { getIo, emitToUser, disconnectUser } from '../socket/index.js';
 import { logger } from '../utils/logger.js';
 
 export const REPORT_REASONS = ['illegal', 'violence', 'extremism', 'drugs', 'csam', 'porn', 'fraud', 'spam', 'other'] as const;
@@ -70,8 +70,7 @@ function blockUser(req: Request, userId: string, reason: string) {
   audit(req, 'user.block', { type: 'user', id: userId }, { reason });
   dbUtils.run('UPDATE users SET blocked_at = ?, blocked_reason = ? WHERE id = ?', [new Date().toISOString(), reason, userId]);
   dbUtils.run('DELETE FROM refresh_tokens WHERE user_id = ?', [userId]);
-  const io = getIo();
-  if (io) emitToUser(io, userId, 'account:blocked', { reason });
+  disconnectUser(userId, reason);
 }
 
 const mimeGroup = (mime: string | null) => {
