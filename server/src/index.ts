@@ -1047,7 +1047,12 @@ async function start(): Promise<void> {
     httpServer.listen(config.port, config.host, () => {
       logger.info(`🚀 STORAGE&MESS Server started`);
       // Свой сервер должен находиться и без интернета — см. lan-discovery
-      startLanDiscovery({ https: useHttps, port: config.port, name: process.env.SERVER_NAME });
+      // Версия продукта — у веб-клиента (у сервера в package.json заглушка 1.0.0)
+      let appVersion = '';
+      try {
+        appVersion = JSON.parse(fs.readFileSync(path.join(process.cwd(), '..', 'web-client', 'package.json'), 'utf8')).version || '';
+      } catch { /* нет рядом веб-клиента — без версии */ }
+      startLanDiscovery({ https: useHttps, port: config.port, name: process.env.SERVER_NAME, version: appVersion });
       initHealthChecker(getIo(), httpServer);
       if (useHttps) {
         initDPIProtection({ port: config.port });

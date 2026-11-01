@@ -10,6 +10,7 @@ import { chatApi, fileApi, userApi, reportApi } from '@/lib/api';
 import { downloadFileNative } from '@/lib/capacitor-bridge';
 import { socketEmit, isSocketConnected } from '@/lib/socket';
 import { getLoraStatus, loraSendChat } from '@/lib/lora';
+import { getHubStatus, hubSendChat } from '@/lib/hub';
 import { startRecording, stopRecording, cancelRecording } from '@/lib/voice';
 import { transcribeAudioFromUrl, learnTranscriptionCorrection } from '@/lib/speech';
 import { 
@@ -958,8 +959,21 @@ export default function ChatArea({ chat, onInitiateCall, isCallActive }: ChatAre
         }
       });
     };
-    // Сервер недоступен — в mesh и LoRa сразу; на сервер уйдёт из очереди
-    if (!isSocketConnected()) { meshFanout(); loraFanout(); }
+    // Аварийная сеть (мини-сервер в этой локальной сети): тот же client_id
+    let hubSent = false;
+    const hubFanout = () => {
+      if (hubSent) return;
+      const me = useAuthStore.getState().user;
+      const hs = getHubStatus().state;
+      if (!me?.id || (hs !== 'serving' && hs !== 'joined')) return;
+      hubSent = true;
+      if (hubSendChat(String(chat.id), me.id, pendingId, content)) {
+        useChatStore.getState().updateMessage(pendingId, { metadata: { viaHub: true } as any });
+        console.log('🛟 [hub] отправлено через аварийную сеть');
+      }
+    };
+    // Сервер недоступен — в mesh, LoRa и аварийную сеть сразу; на сервер уйдёт из очереди
+    if (!isSocketConnected()) { meshFanout(); loraFanout(); hubFanout(); }
 
     // Сообщение уже показано — ставим в очередь для повторной отправки.
     const queueIt = () => enqueueMessage({
@@ -1036,6 +1050,7 @@ export default function ChatArea({ chat, onInitiateCall, isCallActive }: ChatAre
 
         meshFanout();
         loraFanout();
+        hubFanout();
       }
     } catch (error) {
       // Сервер ответил ошибкой (или очередь не записалась) — помечаем как

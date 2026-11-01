@@ -41,6 +41,7 @@ import {
   toggleVideoTrack,
 } from '@/lib/webrtc';
 import Sidebar from '@/components/Sidebar';
+import HubAirChat from '@/components/HubAirChat';
 import ChatArea from '@/components/ChatArea';
 import GroupCallPanel from '@/components/GroupCallPanel';
 import GroupCallSetup from '@/components/GroupCallSetup';
@@ -1021,6 +1022,8 @@ export default function ChatPage() {
 
   // Установка текущего чата + загрузка сообщений (с IndexedDB fallback)
   useEffect(() => {
+    // Эфир аварийной сети — не чат сервера: обычный чат снимаем с выделения
+    if (chatId === 'hub-air') { setCurrentChat(null); return; }
     if (chatId && chats.length > 0) {
       const chat = chats.find(c => c.id === chatId);
       if (chat) {
@@ -1061,7 +1064,7 @@ export default function ChatPage() {
   return (
     <div className="messenger-container">
       {/* Сайдбар */}
-      <div className={`messenger-sidebar ${currentChat ? 'has-chat' : ''}`}>
+      <div className={`messenger-sidebar ${currentChat || chatId === 'hub-air' ? 'has-chat' : ''}`}>
         <Sidebar onOpenGroupCall={() => setShowGroupCallSetup(true)} onOpenStorage={() => setShowStorage(true)} />
       </div>
 
@@ -1077,7 +1080,9 @@ export default function ChatPage() {
 
       {/* Область чата */}
       <div className="messenger-chat-area flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-        {currentChat ? (
+        {chatId === 'hub-air' ? (
+          <HubAirChat />
+        ) : currentChat ? (
           <ChatArea chat={currentChat} onInitiateCall={initiateCall} isCallActive={isCalling || inCall || isWaitingForOffer} />
         ) : (
           <div className="flex-1 flex items-center justify-center text-messenger-muted">

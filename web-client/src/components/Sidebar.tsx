@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth';
 import { useChatStore } from '@/store/chat';
 import { useContactOverrides } from '@/store/contactOverrides';
@@ -41,6 +41,8 @@ import { formatDistanceToNow, format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { isPWAInstalled } from '@/lib/pwa';
 import { getBaseUrl, NetworkStatus, onNetworkStateChange } from '@/lib/connection';
+import { onHubStatus, onHubFeed, hubSupported, HubStatus, HubFeedItem } from '@/lib/hub';
+import { hubLabel } from '@/components/HubPanel';
 
 type FilterTab = 'all' | 'private' | 'group' | 'channel';
 type CreateMode = 'none' | 'pick' | 'group_name' | 'channel_name' | 'group_members' | 'channel_members';
@@ -81,12 +83,19 @@ export default function Sidebar({ onOpenGroupCall, onOpenStorage }: SidebarProps
   
   // Connection status
   const [netStatus, setNetStatus] = useState<NetworkStatus>('connected');
+  const [hub, setHub] = useState<HubStatus | null>(null);
+  // Эфир аварийной сети — отдельной строкой над чатами
+  const [hubFeed, setHubFeed] = useState<HubFeedItem[]>([]);
+  const [hubSeen, setHubSeen] = useState(0);
+  const hubAirOpen = useLocation().pathname === '/chat/hub-air';
 
   useEffect(() => {
     const unsub = onNetworkStateChange((state) => {
       setNetStatus(state.status);
     });
-    return unsub;
+    const unsubHub = onHubStatus(setHub);
+    const unsubFeed = onHubFeed(setHubFeed);
+    return () => { unsub(); unsubHub(); unsubFeed(); };
   }, []);
 
   useEffect(() => {
@@ -430,6 +439,13 @@ export default function Sidebar({ onOpenGroupCall, onOpenStorage }: SidebarProps
         </div>
       </div>
 
+      {hub && hub.state !== 'off' && (
+        <div className="mx-3 mb-1 rounded-lg bg-orange-500/10 text-orange-300 px-3 py-1.5 text-[12px] leading-snug shrink-0">
+          🛟 Аварийная сеть: {hubLabel(hub)}.
+          {(hub.state === 'serving' || hub.state === 'joined') && ' Владелец аварийного сервера может видеть текст.'}
+        </div>
+      )}
+
       <div className="px-3 pb-2 pt-1 shrink-0">
         <div className="relative">
           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -469,6 +485,35 @@ export default function Sidebar({ onOpenGroupCall, onOpenStorage }: SidebarProps
 
       {/* Chat List */}
       <div className="flex-1 overflow-y-auto no-scrollbar">
+        {(() => {
+          // Эфир аварийной сети — строкой над чатами, пока сеть работает или в ленте что-то есть
+          const msgs = hubFeed.filter(m => m.kind === 'msg');
+          if (!hubSupported() || ((!hub || hub.state === 'off') && msgs.length === 0)) return null;
+          const last = msgs[msgs.length - 1];
+          if (hubAirOpen && hubSeen !== msgs.length) setTimeout(() => setHubSeen(msgs.length), 0);
+          const unread = hubAirOpen ? 0 : Math.max(0, msgs.length - hubSeen);
+          return (
+            <div className="px-2 pt-1">
+              <Link to="/chat/hub-air"
+                    className={`flex items-center gap-3 p-2 rounded-xl transition-colors ${hubAirOpen ? 'bg-messenger-accent text-white' : 'hover:bg-messenger-hover text-messenger-text'}`}>
+                <div className="w-12 h-12 rounded-full shrink-0 flex items-center justify-center text-2xl bg-gradient-to-br from-orange-400 to-red-500 shadow-sm">🛟</div>
+                <div className="flex-1 min-w-0 flex flex-col justify-center py-1">
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="font-medium truncate text-[15px]">Эфир аварийной сети</span>
+                    {last && <span className={`text-xs whitespace-nowrap ml-2 ${hubAirOpen ? 'text-white/80' : unread ? 'text-[#3390ec]' : 'text-messenger-muted'}`}>{formatChatTime(new Date(last.at).toISOString())}</span>}
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className={`text-[14px] truncate ${hubAirOpen ? 'text-white/90' : 'text-messenger-muted'}`}>
+                      {last ? <>{last.own ? 'Вы' : last.name}: {last.text}</> : hubLabel(hub!)}
+                    </p>
+                    {unread > 0 && <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-[#3390ec] text-white text-xs flex items-center justify-center">{unread}</span>}
+                  </div>
+                </div>
+              </Link>
+              <div className="mx-2 my-0.5"><div className="h-px bg-messenger-divider" /></div>
+            </div>
+          );
+        })()}
         {filteredChats.length === 0 ? (
           <div className="p-4 flex flex-col items-center justify-center h-full text-messenger-muted">
             <Users className="w-12 h-12 mb-2 opacity-30" />

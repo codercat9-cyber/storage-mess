@@ -165,7 +165,9 @@ export async function loraSendSmess(text: string, toNode?: number): Promise<stri
 export const loraSelfId = () => sealer.id();
 export const loraPeers = (): PeerInfo[] => sealer.peers();
 export const loraTrust = (node: number) => sealer.trust(node);
-export const loraProtected = () => sealer.active;
+// Защита — свойство сборки, а не подключения: до подключения узла ключ просто
+// ещё не загружен, а плашка «без шифрования» в это время вводила в заблуждение.
+export const loraProtected = () => sealer.available;
 
 /** APK: переподключиться к последнему узлу при старте. */
 export function autoReconnect() {

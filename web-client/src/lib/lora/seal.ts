@@ -17,12 +17,20 @@ export interface SealStore {
 }
 export interface PeerInfo { node: number; id: string; changed?: string }
 
+/** Адрес устройства для показа: 6 байт → «xxxx:xxxx:xxxx» */
+export function idOf(a: Uint8Array): string {
+  const h = Array.from(a, x => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 4)}:${h.slice(4, 8)}:${h.slice(8, 12)}`;
+}
+
 export class Sealer {
   private myNode = 0;
   constructor(_store: SealStore, _notice: (s: string) => void = () => {}) {}
   get name() { return 'нет (открытая сборка)'; }
   get active() { return false; }
+  get available() { return false; }
   init(myNode: number) { this.myNode = myNode; }
+  ensureIdentity() {}
   self(): Uint8Array { return addrFromNode(this.myNode); }
   id(): string { return ''; }
   overhead(_toAll: boolean) { return 0; }

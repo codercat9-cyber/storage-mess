@@ -169,6 +169,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Аварийная сеть: основной сервер пропал — найти узел рядом или стать им
+    // (только APK и ПК). Здесь, а не на странице чатов: кнопка в Настройках
+    // должна работать, даже если чаты ещё не открывали.
+    Promise.all([import('@/lib/hub'), import('@/lib/socket'), import('@/store/chat'), import('@/components/LanServerPicker')])
+      .then(([hub, sock, chat, lan]) => {
+        hub.startHubController({
+          chatKnown: chatId => chat.useChatStore.getState().chats.some(c => String(c.id) === String(chatId)),
+          senderName: (chatId, userId) => {
+            const ch = chat.useChatStore.getState().chats.find(c => String(c.id) === String(chatId)) as any;
+            const m = ch?.members?.find((x: any) => String(x.id || x.user_id) === String(userId));
+            return m?.display_name || m?.username || 'Участник';
+          },
+          deviceName: () => {
+            const me = useAuthStore.getState().user;
+            return me?.display_name || me?.username || '';
+          },
+          // Без входа сокета нет вовсе — это не пропажа сервера
+          mainUp: () => !useAuthStore.getState().isAuthenticated || sock.isSocketConnected(),
+          discover: lan.discoverLanServers,
+          visible: () => document.visibilityState === 'visible',
+        });
+      }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     // resolveServerUrl работает в фоне, мы не ждём его для рендера UI
     resolveServerUrl().then(() => {
       updateApiBaseUrl();

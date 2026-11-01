@@ -2,7 +2,11 @@ import { useState } from 'react';
 import { setCustomServerUrl, getCustomServerUrlValue, resetConnection } from '@/lib/connection';
 import { useAuthStore } from '@/store/auth';
 
-interface LanServer { app?: string; name?: string; version?: string; urls?: string[]; from?: string }
+/** mode:'hub' — аварийный узел внутри приложения (lib/hub), у полноценного сервера поля mode нет. */
+export interface LanServer {
+  app?: string; name?: string; version?: string; urls?: string[]; from?: string;
+  mode?: string; hub?: string; clients?: number; started?: number;
+}
 
 /**
  * Свой сервер рядом — самохост и аварийная связь без интернета.
@@ -51,7 +55,13 @@ export default function LanServerPicker({ compact = false }: { compact?: boolean
       <div className="flex flex-wrap gap-2">
         {canDiscoverLan() && (
           <button type="button" disabled={busy}
-                  onClick={async () => { setBusy(true); setList(await discoverLanServers()); setBusy(false); }}
+                  onClick={async () => {
+                    setBusy(true);
+                    // Аварийный узел — не сервер с учётками: войти в него нельзя,
+                    // к нему приложение подключается само (Настройки → Аварийный сервер).
+                    setList((await discoverLanServers()).filter(s => s.mode !== 'hub'));
+                    setBusy(false);
+                  }}
                   className="px-3 py-1.5 rounded-lg bg-messenger-hover text-messenger-text text-[13px]">
             {busy ? 'Ищу…' : 'Найти сервер рядом'}
           </button>
